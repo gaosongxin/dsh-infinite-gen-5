@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { hostPlatform, runtimePlatform } from './source/host_platform.js';
 
-const names = new Set(['reverse', 'ghidra', 'x64dbg']);
+const names = new Set(['reverse', 'ghidra', 'x64dbg', 'lldb']);
 export function engineId(value) {
   const id = String(value || '').toLowerCase();
   if (!names.has(id)) throw new Error(`Unknown IG5 engine: ${value}`);
@@ -97,8 +97,10 @@ export function readRuntime(root, engine, override, options = {}) {
   const failure = () => ({ ...raw, engine, source, platform: raw.platform || host.id, manifest: file, root: base, available: false,
     validation: nativeValidation, integrityVerified: false, validationErrors: errors,
     reason: errors.slice(0, 8).join('; ') });
-  if (!host.supported || engine === 'x64dbg' && !windows) {
-    errors.push(!host.supported ? host.reason : 'x64dbg requires a Windows x64 host; no Android/Linux/iOS native runtime is supported');
+  if (!host.supported || engine === 'x64dbg' && !windows || engine === 'lldb' && !darwin) {
+    errors.push(!host.supported ? host.reason : engine === 'lldb'
+      ? 'lldb requires a macOS host; Apple ships the debugger and its Python bindings only for Darwin'
+      : 'x64dbg requires a Windows x64 host; no Android/Linux/iOS native runtime is supported');
     return failure();
   }
   try {
@@ -109,7 +111,7 @@ export function readRuntime(root, engine, override, options = {}) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Runtime manifest must be an object');
     if (raw.engine && String(raw.engine).toLowerCase() !== engine) throw new Error('Runtime manifest engine does not match ' + engine);
     if (raw.schemaVersion !== undefined && raw.schemaVersion !== 1) throw new Error('Unsupported runtime manifest schema');
-    if (!['ghidra', 'x64dbg'].includes(engine)) throw new Error('Unsupported standalone runtime engine');
+    if (!['ghidra', 'x64dbg', 'lldb'].includes(engine)) throw new Error('Unsupported standalone runtime engine');
     runtimePlatform(raw, host);
     if (source === 'bundled') {
       const bundleRoot = path.resolve(options.bundleRoot || root), physicalBundle = fs.realpathSync(bundleRoot);
@@ -117,8 +119,9 @@ export function readRuntime(root, engine, override, options = {}) {
       const bundleFile = path.join(bundleRoot, 'manifest.json');
       if (!inside(physicalBundle, fs.realpathSync(bundleFile))) throw new Error('Bundle inventory escapes the runtime directory');
       const bundle = JSON.parse(readText(bundleFile, 67108864));
+      const requiredEngines = engine === 'lldb' ? ['lldb'] : windows ? ['ghidra', 'x64dbg'] : ['ghidra'];
       if (bundle.schemaVersion !== 1 || bundle.platform !== host.id || typeof bundle.pluginVersion !== 'string'
-          || !Array.isArray(bundle.engines) || !(windows ? ['ghidra', 'x64dbg'] : ['ghidra']).every(id => bundle.engines.includes(id))
+          || !Array.isArray(bundle.engines) || !requiredEngines.every(id => bundle.engines.includes(id))
           || !Array.isArray(bundle.files) || !bundle.files.length) throw new Error('Invalid bundled runtime inventory');
       inventory = { root: bundleRoot, files: new Map() };
       for (const entry of bundle.files) {
@@ -161,6 +164,30 @@ export function readRuntime(root, engine, override, options = {}) {
   };
   const under = (home, suffix, label, kind = 'file', bits = null) => component(home && path.join(home, suffix), label, kind, bits);
   component(file, 'runtime.json');
+  if (engine === 'lldb') {
+    // The lldb lane is a thin supervisor: its launcher is a shell wrapper (not a
+    // Mach-O image) and the debugger plus Python bindings live in the Xcode
+    // installation outside the plugin. Validate what this host can actually
+    // reach instead of requiring a bundled native binary.
+    const launcher = component(resolved.pythonExe, 'pythonExe', 'executable');
+    if (launcher) {
+      try {
+        const head = readText(launcher, 65536);
+        if (!head.startsWith('#!')) errors.push('pythonExe: lldb launcher must be a shell script with a shebang');
+      } catch (error) { errors.push('pythonExe: ' + error.message); }
+    }
+    const hostPaths = [['lldbFramework', raw.lldbFramework], ['pythonBinding', raw.pythonBinding]];
+    for (const [key, value] of hostPaths) {
+      if (typeof value !== 'string' || !path.isAbsolute(value)) { errors.push(`Manifest ${key} must be an absolute host path`); continue; }
+      try {
+        if (!fs.statSync(value).isDirectory()) throw new Error('not a directory');
+      } catch (error) { errors.push(`${key}: ${error.message} (Xcode must be installed)`); }
+    }
+    if (raw.hostRequirement && raw.hostRequirement !== host.platform) errors.push(`lldb lane requires host ${raw.hostRequirement}; this host is ${host.platform}`);
+    return { ...resolved, available: errors.length === 0, portable: false,
+      validation: 'host-debugger-presence', integrityVerified: false, validationErrors: errors,
+      ...(errors.length ? { reason: errors.slice(0, 8).join('; ') } : {}) };
+  }
   const python = component(resolved.pythonExe, 'pythonExe', windows ? 'file' : 'executable', 64);
   const pythonHome = python && (windows ? path.dirname(python) : path.dirname(path.dirname(python)));
   if (windows) {
@@ -265,7 +292,7 @@ export function runtimeConfiguration(cfg = {}, options = {}) {
     return readRuntime(runtimeRoot, engine, value, { source, bundleRoot: runtimeRoot, host });
   };
   return { host, home, runtimeRoot, reverseProvider, projectRoot: path.resolve(cfg.projectRoot || path.join(home, 'projects')),
-    ghidra: select('ghidra'), x64dbg: select('x64dbg') };
+    ghidra: select('ghidra'), x64dbg: select('x64dbg'), lldb: select('lldb') };
 }
 
 export function terminateTree(proc, options = {}) {

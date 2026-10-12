@@ -1,0 +1,26 @@
+#!/bin/sh
+# IG5 LLDB worker launcher.
+#
+# Apple ships the LLDB Python bindings inside the Xcode application bundle and
+# builds them for the interpreter Xcode also ships (Python 3.9). There is no
+# standalone lldb wheel for macOS, so this wrapper resolves the framework
+# interpreter at launch time and forwards every argument to it.
+#
+# Override with IG5_LLDB_PYTHON when Xcode lives somewhere else.
+set -eu
+
+PY="${IG5_LLDB_PYTHON:-}"
+if [ -z "$PY" ]; then
+  for candidate in \
+    /Applications/Xcode.app/Contents/Developer/usr/bin/python3.9 \
+    /Applications/Xcode-beta.app/Contents/Developer/usr/bin/python3.9
+  do
+    if [ -x "$candidate" ]; then PY="$candidate"; break; fi
+  done
+fi
+if [ -z "$PY" ]; then
+  echo "ig5-lldb: Xcode Python 3.9 not found; install Xcode or set IG5_LLDB_PYTHON" >&2
+  exit 127
+fi
+
+exec "$PY" "$@"

@@ -35,6 +35,10 @@ export function workerLaunch(cfg, engine, pluginRoot) {
       IG5_GHIDRA_PROJECT_ROOT: paths.join(cfg.projectRoot, builtinReverse ? 'reverse-databases' : 'ghidra-databases'),
       IG5_GHIDRA_ROUTE: engine,
     });
+    else if (provider === 'lldb') Object.assign(env, {
+      IG5_LLDB_RUNTIME: pack.manifest,
+      IG5_LLDB_STATE_ROOT: paths.join(cfg.stateRoot || paths.join(cfg.home || cfg.artifactDir || cfg.projectRoot, 'state'), 'lldb'),
+    });
     else Object.assign(env, {
       IG5_X64DBG_RUNTIME: pack.manifest,
       IG5_X64DBG_STATE_ROOT: paths.join(cfg.stateRoot || paths.join(cfg.home || cfg.artifactDir || cfg.projectRoot, 'state'), 'x64dbg'),

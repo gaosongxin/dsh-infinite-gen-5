@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "engine": "lldb",
+  "platform": "darwin-x64",
+  "mode": "headless",
+  "pythonExe": "bin/ig5-lldb-python",
+  "lldbFramework": "/Applications/Xcode.app/Contents/SharedFrameworks/LLDB.framework",
+  "pythonBinding": "/Applications/Xcode.app/Contents/SharedFrameworks/LLDB.framework/Resources/Python",
+  "hostRequirement": "darwin",
+  "capabilities": [
+    "load", "start", "bpt", "unbpt", "regs", "setreg", "step", "stepover",
+    "cont", "suspend", "readmem", "writemem", "stop", "state", "event",
+    "modules", "trace", "threads", "callstack",
+    "hardware_breakpoint", "thread_return", "memory_regions"
+  ],
+  "notes": "ptrace-based attach is blocked by SIP for platform-signed binaries; re-sign the target with com.apple.security.get-task-allow, or debug an unsigned/local build."
+}

@@ -26,6 +26,9 @@ const PLUGIN_ID = 'dsh-infinite-gen-5';
 const PLUGIN_VERSION = '1.0.0';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKER = path.join(HERE, 'worker', 'ig5_worker.py');
+// Debugger lanes own a live process instead of an analysis database, so they are
+// excluded from static-session limits, target selection and shutdown sweeps.
+const DEBUG_ENGINES = new Set(['x64dbg', 'lldb']);
 
 // ── Config（cordis.yml 插件行可覆盖；misconfiguration fails loud） ──────────
 function resolveConfig(cfg = {}) {
@@ -48,7 +51,8 @@ function resolveConfig(cfg = {}) {
     reverseProvider,
     pythonExe,
     defaultEngine: cfg.defaultEngine ? engineId(cfg.defaultEngine) : 'reverse',
-    defaultDebugger: cfg.defaultDebugger || (runtime.x64dbg.available ? 'x64dbg' : 'auto'),
+    // Prefer the platform's native debugger lane: x64dbg on Windows, lldb on macOS.
+    defaultDebugger: cfg.defaultDebugger || (runtime.x64dbg.available ? 'x64dbg' : runtime.lldb?.available ? 'lldb' : 'auto'),
     projectRoot: cfg.projectRoot || (cfg.artifactDir ? path.join(cfg.artifactDir, 'projects') : runtime.projectRoot),
     stateRoot: cfg.stateRoot || (cfg.artifactDir ? path.join(cfg.artifactDir, 'runtime-state') : path.join(runtime.home, 'state')),
     requestTimeoutMs: Number(cfg.requestTimeoutMs ?? 240_000),
@@ -112,7 +116,7 @@ class WorkerManager {
 
   selectedTarget() {
     const engine = this.scope.getStore()?.engine || this.cfg.defaultEngine;
-    const live = [...this.sessions.values()].filter((s) => this.alive(s) && s.engine === engine && s.engine !== 'x64dbg');
+    const live = [...this.sessions.values()].filter((s) => this.alive(s) && s.engine === engine && !DEBUG_ENGINES.has(s.engine));
     if (live.length !== 1) throw new Error('Specify target when there are zero or multiple active targets in the selected engine');
     return live[0].target;
   }
@@ -140,7 +144,7 @@ class WorkerManager {
   async admitSession(key, target, engine) {
     const pending = this.admissions.catch(() => {}).then(async () => {
       this.checkCancelled();
-      if (engine !== 'x64dbg' && [...this.sessions.values()].filter((s) => s.engine !== 'x64dbg').length >= this.cfg.maxSessions) await this.closeOldest();
+      if (!DEBUG_ENGINES.has(engine) && [...this.sessions.values()].filter((s) => !DEBUG_ENGINES.has(s.engine)).length >= this.cfg.maxSessions) await this.closeOldest();
       const session = { key, engine, target: path.resolve(String(target)), proc: null, ready: false,
         pending: new Map(), seq: 0, startedAt: Date.now(), info: null, lastOp: 'launching', lastStage: null,
         progress: null, stderrTail: '', cache: new Map(), dbRevision: 0, queuedOperations: 0, state: 'opening' };
@@ -166,7 +170,7 @@ class WorkerManager {
 
   async open(target, autoAnalysis = true, options = {}) {
     const engine = engineId(options.engine || this.scope.getStore()?.engine || this.cfg.defaultEngine || 'reverse');
-    if (engine === 'x64dbg' && !options.internal) throw new Error('Use ig5_dbg backend=x64dbg for runtime execution');
+    if (DEBUG_ENGINES.has(engine) && !options.internal) throw new Error(`Use ig5_dbg backend=${engine} for runtime execution`);
     const fresh = options.fresh === true;
     const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
     const key = this.sessionKey(target, engine);
@@ -249,7 +253,7 @@ class WorkerManager {
           if (!proc.__ig5TransportTerminated) terminateTree(proc);
           this.releaseAttachmentAfterExit(session);
           if (this.sessions.get(key) === session) this.sessions.delete(key);
-          if (session.engine === 'x64dbg') this.debugOwners.delete(path.resolve(session.target).toLowerCase());
+          if (DEBUG_ENGINES.has(session.engine)) this.debugOwners.delete(path.resolve(session.target).toLowerCase());
           session.runtime = null; session.controlOwner = null;
         },
       });
@@ -301,7 +305,7 @@ class WorkerManager {
       });
     }
     if (method === 'dbg-native') method = 'dbg';
-    else if (method === 'dbg' && session?.engine !== 'x64dbg') return this.debug(session, params, timeoutMs);
+    else if (method === 'dbg' && !DEBUG_ENGINES.has(session?.engine)) return this.debug(session, params, timeoutMs);
     if (!this.alive(session)) throw new Error(publicEngineError(`worker 不在运行（目标：${session?.target ?? '?'}），请先 ig5_open`, this.cfg));
     if (Array.isArray(session.capabilities) && !session.capabilities.includes(method)) {
       throw new Error(`${session.engine} does not support ${method}; select an engine that advertises this capability`);
@@ -366,10 +370,12 @@ class WorkerManager {
     if (owner && backend !== owner && !(owner === 'reverse' && ['auto', 'bochs', 'win32'].includes(backend))) {
       throw new Error(`Target already has a ${owner} debug session; stop it before switching debugger`);
     }
-    const debuggerEngine = backend === 'x64dbg' ? 'x64dbg' : 'reverse';
+    const debuggerEngine = ['x64dbg', 'lldb'].includes(backend) ? backend : 'reverse';
     if (debuggerEngine !== 'x64dbg' && (['threads', 'callstack'].includes(params.op)
         || ['bpt', 'unbpt'].includes(params.op) && params.kind === 'hardware')) {
-      throw Object.assign(new Error('Threads, callstack and hardware breakpoints require backend=x64dbg; this Reverse debugger does not advertise them'), { code: 'unsupported' });
+      if (debuggerEngine !== 'lldb') {
+        throw Object.assign(new Error('Threads, callstack and hardware breakpoints require backend=x64dbg; this Reverse debugger does not advertise them'), { code: 'unsupported' });
+      }
     }
     if (['load', 'start'].includes(params.op)) {
       const executedPath = params.path || session.target;
@@ -383,9 +389,9 @@ class WorkerManager {
       params = { ...params, rva: '0x' + (value - BigInt(session.info.imageBase)).toString(16), addressSpace: 'runtime' };
     }
     let debugSession = session;
-    if (debuggerEngine === 'x64dbg') {
-      await this.open(session.target, false, { engine: 'x64dbg', internal: true });
-      debugSession = this.sessions.get(this.sessionKey(session.target, 'x64dbg'));
+    if (debuggerEngine === 'x64dbg' || debuggerEngine === 'lldb') {
+      await this.open(session.target, false, { engine: debuggerEngine, internal: true });
+      debugSession = this.sessions.get(this.sessionKey(session.target, debuggerEngine));
     } else if (session.engine !== 'reverse' || this.cfg.reverseProvider === 'bundled') {
       throw new Error('This debugger requires the optional commercial provider; select backend=x64dbg for the bundled core');
     }
@@ -406,7 +412,7 @@ class WorkerManager {
     // The lower RPC must bypass routing only for the Reverse implementation.
     let result;
     try {
-      result = debuggerEngine === 'x64dbg'
+      result = debuggerEngine === 'x64dbg' || debuggerEngine === 'lldb'
         ? await this.rpc(debugSession, 'dbg', { ...params, backend }, timeoutMs)
         : await this.rawDebug(session, { ...params, backend }, timeoutMs);
     } catch (error) {
@@ -475,7 +481,7 @@ class WorkerManager {
       readiness: this.cfg.reverseRuntime?.readiness || 'detected', runtimeReady: this.cfg.reverseRuntime?.runtimeReady ?? null,
       startupVerified: this.cfg.reverseRuntime?.startupVerified === true, validation: this.cfg.reverseRuntime?.validation || 'files-only',
       reason: this.cfg.reverseRuntime?.reason, code: this.cfg.reverseRuntime?.code, discoveryPartial: this.cfg.reverseRuntime?.discoveryPartial === true },
-      ...['ghidra', 'x64dbg'].map((id) => ({ id, label: id === 'ghidra' ? 'Ghidra' : 'x64dbg',
+      ...['ghidra', 'x64dbg', 'lldb'].map((id) => ({ id, label: id === 'ghidra' ? 'Ghidra' : id === 'lldb' ? 'lldb · macOS' : 'x64dbg',
         available: !!this.cfg[id]?.available, platform: this.cfg[id]?.platform, mode: this.cfg[id]?.mode || 'headless',
         default: this.cfg.defaultEngine === id, source: this.cfg[id]?.source, portable: this.cfg[id]?.portable,
         reason: this.cfg[id]?.reason }))];
@@ -484,7 +490,7 @@ class WorkerManager {
   async closeOldest() {
     let oldest = null;
     for (const s of this.sessions.values()) {
-      if (s.engine === 'x64dbg' || this.debugOwners.has(path.resolve(s.target).toLowerCase())) continue;
+      if (DEBUG_ENGINES.has(s.engine) || this.debugOwners.has(path.resolve(s.target).toLowerCase())) continue;
       if (!s.info || s.pending.size || s.queuedOperations || s.closing) continue;
       if (!oldest || s.startedAt < oldest.startedAt) oldest = s;
     }
@@ -525,7 +531,7 @@ class WorkerManager {
     }
     this.sessions.delete(key);
     this.releaseAttachmentAfterExit(s);
-    if (s.engine === 'x64dbg') this.debugOwners.delete(path.resolve(s.target).toLowerCase());
+    if (DEBUG_ENGINES.has(s.engine)) this.debugOwners.delete(path.resolve(s.target).toLowerCase());
     s.runtime = null; s.controlOwner = null;
   }
 
@@ -533,8 +539,10 @@ class WorkerManager {
     const key = this.sessionKey(target, engine);
     const s = this.sessions.get(key);
     if (!s) return false;
-    const debugKey = this.sessionKey(target, 'x64dbg');
-    const debug = this.sessions.get(debugKey) || (s.engine === 'reverse' && this.debugOwners.has(path.resolve(s.target).toLowerCase()) ? s : null);
+    // A debugger lane may be attached to this target under a different engine.
+    const debugKeys = [...DEBUG_ENGINES].map((id) => this.sessionKey(target, id));
+    const debug = debugKeys.map((k) => this.sessions.get(k)).find(Boolean)
+      || (s.engine === 'reverse' && this.debugOwners.has(path.resolve(s.target).toLowerCase()) ? s : null);
     const caller = this.scope.getStore()?.agentId || 'local';
     if (!force && debug?.controlOwner && debug.controlOwner !== caller) throw new Error('Active debugger is controlled by another agent; stop it with an approved takeover before closing');
     if (s.closing) return s.closePromise;
@@ -543,7 +551,7 @@ class WorkerManager {
       try {
         await Promise.resolve(s.operationQueue).catch(() => {});
         if (debug && this.alive(debug) && this.debugOwners.has(path.resolve(s.target).toLowerCase())) {
-          try { await this.performDebug(s, { op: 'stop', backend: debug.engine === 'x64dbg' ? 'x64dbg' : 'auto', ...(force ? { control: 'takeover' } : {}) }, 10_000); }
+          try { await this.performDebug(s, { op: 'stop', backend: DEBUG_ENGINES.has(debug.engine) ? debug.engine : 'auto', ...(force ? { control: 'takeover' } : {}) }, 10_000); }
           catch (error) { if (!force) throw error; diagAppend(this.cfg, `host: debugger stop during shutdown: ${publicEngineError(error, this.cfg)}`); }
         }
         if (this.alive(s) && s.lastOp !== 'open') {
@@ -556,7 +564,7 @@ class WorkerManager {
         diagAppend(this.cfg, `host: forced shutdown after checkpoint failure: ${publicEngineError(error, this.cfg)}`);
       }
       this.killSession(key);
-      if (debugKey !== key) this.killSession(debugKey);
+      if (!debugKeys.includes(key)) for (const k of debugKeys) this.killSession(k);
       return true;
     })();
     return s.closePromise;
@@ -635,7 +643,7 @@ class WorkerManager {
       now: Date.now(),
       sessions: this.status(),
       jobs: [...this.jobs.values()].sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0)),
-      config: { host: this.cfg.host, runtimeSource: Object.fromEntries(['ghidra', 'x64dbg'].map(id => [id, this.cfg[id]?.source || null])), engine: this.cfg.defaultEngine, engines: this.engines(), maxSessions: this.cfg.maxSessions, openTimeoutMs: this.cfg.openTimeoutMs,
+      config: { host: this.cfg.host, runtimeSource: Object.fromEntries(['ghidra', 'x64dbg', 'lldb'].map(id => [id, this.cfg[id]?.source || null])), engine: this.cfg.defaultEngine, engines: this.engines(), maxSessions: this.cfg.maxSessions, openTimeoutMs: this.cfg.openTimeoutMs,
         ...(this.workflow?.snapshot() || { toolset: this.cfg.toolset }) },
     };
   }
@@ -887,9 +895,10 @@ function installDataRoute(ctx, mgr, cfg) {
             return;
           }
           if (type === 'debug_state') {
-            if (engine && engine !== 'x64dbg') { send(400, { error: 'debug_state requires engine=x64dbg' }); return; }
-            const debug = target ? mgr.sessions.get(mgr.sessionKey(target, 'x64dbg')) : [...mgr.sessions.values()].find((s) => s.engine === 'x64dbg');
-            send(200, { target: target || debug?.target || '', engine: 'x64dbg', type,
+            if (engine && !DEBUG_ENGINES.has(engine)) { send(400, { error: 'debug_state requires a debugger engine (x64dbg or lldb)' }); return; }
+            const debug = (target && (engine ? mgr.sessions.get(mgr.sessionKey(target, engine)) : [...DEBUG_ENGINES].map((id) => mgr.sessions.get(mgr.sessionKey(target, id))).find(Boolean)))
+              || [...mgr.sessions.values()].find((s) => DEBUG_ENGINES.has(s.engine));
+            send(200, { target: target || debug?.target || '', engine: debug?.engine || engine || 'x64dbg', type,
               data: debug?.runtime || { state: 'idle', note: 'Use the approved debug tool to execute a target' } });
             return;
           }
@@ -899,7 +908,7 @@ function installDataRoute(ctx, mgr, cfg) {
             send(400, { error: 'Only struct list/get is supported by this read-only route' });
             return;
           }
-          const session = target ? mgr.sessions.get(mgr.sessionKey(target, engine)) : [...mgr.sessions.values()].find((s) => mgr.alive(s) && s.engine !== 'x64dbg' && (!engine || s.engine === engine));
+          const session = target ? mgr.sessions.get(mgr.sessionKey(target, engine)) : [...mgr.sessions.values()].find((s) => mgr.alive(s) && !DEBUG_ENGINES.has(s.engine) && (!engine || s.engine === engine));
           if (!session || !mgr.alive(session)) {
             send(200, { error: 'no open target' });
             return;
@@ -1124,7 +1133,7 @@ function defineIg5Tools(ctx, mgr, cfg) {
           version: PLUGIN_VERSION,
           engine: cfg.defaultEngine || 'reverse',
           host: cfg.host,
-          runtimeSource: Object.fromEntries(['ghidra', 'x64dbg'].map(id => [id, cfg[id]?.source || null])),
+          runtimeSource: Object.fromEntries(['ghidra', 'x64dbg', 'lldb'].map(id => [id, cfg[id]?.source || null])),
           engines: mgr.engines?.() || [],
           projects: mgr.projects?.listProjects?.() || [],
           ...(mgr.workflow?.snapshot(execution) || { toolset: cfg.toolset || 'core' }),
@@ -1151,7 +1160,7 @@ function defineIg5Tools(ctx, mgr, cfg) {
     {
       name: 'ig5_doctor',
       description:
-        'Self-check the selected IG5 engine/provider. Default Reverse and Ghidra use the bundled Ghidra runtime; x64dbg uses the bundled debugger. Only an explicitly selected commercial Reverse provider requires a licensed local installation. Reports actual startup status and capabilities; file presence alone is not startup verification.',
+        'Self-check the selected IG5 engine/provider. Default Reverse and Ghidra use the bundled Ghidra runtime; x64dbg uses the bundled Windows debugger; lldb uses the macOS debugger from the local Xcode installation. Only an explicitly selected commercial Reverse provider requires a licensed local installation. Reports actual startup status and capabilities; file presence alone is not startup verification.',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
       output: { schema: { type: 'object', additionalProperties: true }, render: textRender },
       async execute(args = {}) {
@@ -1733,7 +1742,7 @@ function defineIg5Tools(ctx, mgr, cfg) {
     {
       name: 'ig5_dbg',
       description:
-        'Debug lane using the configured debugger, with bundled x64dbg as the default. Optional win32/Bochs debuggers require the explicitly selected commercial Reverse provider. Choose backend explicitly for load. Reports bounded debug events, process state and exception context. Approval-gated; start executes the debuggee. Runtime addresses must not be confused with static database addresses.',
+        'Debug lane using the configured debugger: bundled x64dbg on Windows, LLDB on macOS. Optional win32/Bochs debuggers require the explicitly selected commercial Reverse provider. Choose backend explicitly for load. Reports bounded debug events, process state and exception context. Approval-gated; start executes the debuggee. Runtime addresses must not be confused with static database addresses.',
       parameters: {
         type: 'object',
         properties: {
@@ -1744,7 +1753,7 @@ function defineIg5Tools(ctx, mgr, cfg) {
           },
           kind: { type: 'string', enum: ['software', 'hardware'], default: 'software', description: 'Breakpoint kind for bpt/unbpt' },
           access: { type: 'string', enum: ['execute', 'write', 'readwrite'], default: 'execute', description: 'Hardware breakpoint access' },
-          backend: { type: 'string', enum: ['auto', 'x64dbg', 'bochs', 'win32'], description: 'Explicit debugger selection; auto resumes the selected debugger, otherwise uses the configured default (bundled x64dbg). bochs/win32 require the commercial Reverse provider.' },
+          backend: { type: 'string', enum: ['auto', 'x64dbg', 'lldb', 'bochs', 'win32'], description: 'Explicit debugger selection; auto resumes the selected debugger, otherwise uses the configured default (bundled x64dbg on Windows, lldb on macOS). bochs/win32 require the commercial Reverse provider.' },
           control: { type: 'string', enum: ['claim', 'takeover', 'release'], description: 'Explicit approval-gated debugger ownership change' },
           expected_stop_seq: { type: 'number', description: 'Reject a plan made for a previous debugger pause' },
           expected_run_id: { type: 'string' },
@@ -1970,7 +1979,7 @@ export function apply(ctx, config = {}) {
       const isGlobal = ['ig5_profile', 'ig5_status', 'ig5_crypto', 'ig5_protocol'].includes(definition.name);
       const isData = ['ig5_crypto', 'ig5_protocol'].includes(definition.name);
       definition.parameters.properties.engine = { type: 'string', enum: definition.name === 'ig5_doctor'
-        ? ['reverse', 'ghidra', 'x64dbg'] : ['reverse', 'ghidra'],
+        ? ['reverse', 'ghidra', 'x64dbg', 'lldb'] : ['reverse', 'ghidra'],
         description: isData ? 'Optional result association or static source backend; standalone byte/file/ref analysis does not require an engine.' : 'Explicit backend. Omit to use the configured primary static engine; results identify their source.' };
       if (IG5_WRITE_TOOLS.has(definition.name) && definition.name !== 'ig5_sync') definition.parameters.properties.expected_revision = {
         type: 'number', description: 'Reject this operation if the selected database revision has changed since planning' };
@@ -2016,7 +2025,7 @@ export function apply(ctx, config = {}) {
       await workflow.dispose();
       await mgr.analysis?.dispose();
       await mgr.kernel?.dispose();
-      await Promise.all([...mgr.sessions.values()].filter((s) => s.engine !== 'x64dbg').map((s) => mgr.close(s.target, true, s.engine, { force: true })));
+      await Promise.all([...mgr.sessions.values()].filter((s) => !DEBUG_ENGINES.has(s.engine)).map((s) => mgr.close(s.target, true, s.engine, { force: true })));
       await Promise.all([...mgr.sessions.values()].map((s) => mgr.close(s.target, true, s.engine, { force: true })));
     };
   }, `${PLUGIN_ID}: ig5 tool surface`);
