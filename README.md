@@ -29,7 +29,7 @@
 >
 > 装完重启 DSH 即可使用。`./verify-darwin.sh --plugin` 可随时自检。
 >
-> **文档**：[平台适配](docs/DARWIN_X64.md) · [lldb 调试车道](docs/LLDB_LANE.md) · [实验记录](docs/DARWIN_X64_NOTES.md) · [维护速查](.ig5-local/README.md)
+> **文档**：👉 [**快速开始**](docs/QUICKSTART.md) · [平台适配](docs/DARWIN_X64.md) · [lldb 调试车道](docs/LLDB_LANE.md) · [实验记录](docs/DARWIN_X64_NOTES.md) · [维护速查](.ig5-local/README.md)
 >
 > 上游同步：`./sync-upstream.sh`（rebase 到 `darwin-x64` 分支）
 

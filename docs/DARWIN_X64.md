@@ -380,6 +380,10 @@ ig5_bytes         → 原始 hex
 
 ## 九、相关文档
 
+- [QUICKSTART.md](QUICKSTART.md) — 从零开始的安装路径
 - [LLDB_LANE.md](LLDB_LANE.md) — lldb 调试后端
+- [DARWIN_X64_NOTES.md](DARWIN_X64_NOTES.md) — 移植实验记录
 - [../.ig5-local/README.md](../.ig5-local/README.md) — 维护速查
+- [../install-darwin.sh](../install-darwin.sh) — 一键安装脚本
+- [../verify-darwin.sh](../verify-darwin.sh) — 环境自检脚本
 - [../sync-upstream.sh](../sync-upstream.sh) — 上游同步脚本

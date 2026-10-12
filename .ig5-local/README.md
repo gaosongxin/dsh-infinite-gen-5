@@ -5,6 +5,7 @@
 - 仓库：<https://github.com/pyt111/dsh-infinite-gen-5>（fork of Minglink/dsh-infinite-gen-5）
 - 本地：`~/DshWorkspace/dsh-infinite-gen-5`
 - 部署：`~/.dsh/plugins/dsh-infinite-gen-5`
+- 快速开始：[docs/QUICKSTART.md](../docs/QUICKSTART.md)
 - 详细文档：[docs/DARWIN_X64.md](../docs/DARWIN_X64.md) · [docs/LLDB_LANE.md](../docs/LLDB_LANE.md)
 
 ---
