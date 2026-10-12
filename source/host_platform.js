@@ -10,7 +10,7 @@ export function hostPlatform(options = {}) {
   const androidRootfs = platform === 'linux' && arch === 'arm64'
     && !!(environment.ANDROID_ROOT || environment.ANDROID_DATA || environment.IG5_ANDROID_ROOTFS === '1');
   const id = `${platform}-${arch}`;
-  const supported = id === 'win32-x64' || id === 'linux-arm64';
+  const supported = id === 'win32-x64' || id === 'linux-arm64' || id === 'darwin-x64';
   return {
     platform, arch, id, supported,
     execution: platform === 'ios' ? 'unsupported-native-host' : androidRootfs ? 'android-linux-rootfs' : 'local-node-host',
@@ -20,7 +20,9 @@ export function hostPlatform(options = {}) {
       ? 'No validated iOS native DSH worker host is available'
       : platform === 'android'
         ? 'Android Bionic native hosts require a separate runtime; Linux packs require an ARM64 glibc rootfs host'
-        : `No matching IG5 runtime is supported for ${id}` } : {}),
+        : platform === 'darwin'
+          ? `No matching IG5 runtime is supported for ${id}; Intel (x86_64) macOS packs are locally built, Apple Silicon is not supported`
+          : `No matching IG5 runtime is supported for ${id}` } : {}),
   };
 }
 

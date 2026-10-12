@@ -51,10 +51,42 @@ function elfArchitecture(file) {
   } finally { fs.closeSync(descriptor); }
 }
 
+// Mach-O 64-bit x86_64 executable/bundle/dylib. A universal (fat) binary is
+// accepted only when it actually carries the x86_64 slice this host executes.
+function machoArchitecture(file) {
+  const descriptor = fs.openSync(file, 'r');
+  try {
+    const head = Buffer.alloc(8);
+    if (fs.readSync(descriptor, head, 0, 8, 0) !== 8) throw new Error('invalid Mach-O header');
+    const magic = head.readUInt32BE(0);
+    const MH_MAGIC_64 = 0xfeedfacf, MH_CIGAM_64 = 0xcffaedfe, FAT_MAGIC = 0xcafebabe, FAT_CIGAM = 0xbebafeca;
+    const CPU_TYPE_X86_64 = 0x01000007;
+    if (magic === MH_MAGIC_64 || magic === MH_CIGAM_64) {
+      if (head.readUInt32LE(4) !== CPU_TYPE_X86_64) throw new Error('expected macOS x86_64 Mach-O');
+      return;
+    }
+    if (magic === FAT_MAGIC || magic === FAT_CIGAM) {
+      const swap = magic === FAT_CIGAM;
+      const count = swap ? head.readUInt32LE(4) : head.readUInt32BE(4);
+      if (!Number.isSafeInteger(count) || count < 1 || count > 64) throw new Error('invalid Mach-O fat header');
+      const table = Buffer.alloc(20 * count);
+      if (fs.readSync(descriptor, table, 0, table.length, 8) !== table.length) throw new Error('truncated Mach-O fat header');
+      for (let i = 0; i < count; i += 1) {
+        const cputype = swap ? table.readUInt32LE(i * 20) : table.readUInt32BE(i * 20);
+        if (cputype === CPU_TYPE_X86_64) return;
+      }
+      throw new Error('Mach-O universal binary has no x86_64 slice');
+    }
+    throw new Error('expected macOS Mach-O binary');
+  } finally { fs.closeSync(descriptor); }
+}
+
 /** Validate structure and small native headers. Full SHA-256 verification belongs to packaging/install. */
 export function readRuntime(root, engine, override, options = {}) {
   const host = options.host || hostPlatform();
   const windows = host.id === 'win32-x64';
+  const darwin = host.id === 'darwin-x64';
+  const nativeValidation = windows ? 'structure-and-pe-headers' : darwin ? 'structure-and-macho-headers' : 'structure-and-elf-headers';
   const pathKey = value => windows ? value.replaceAll('\\', '/').toLowerCase() : value.replaceAll('\\', '/');
   const source = options.source || (override ? 'override' : 'config');
   const location = path.resolve(override || path.join(root, engine, 'runtime.json'));
@@ -63,7 +95,7 @@ export function readRuntime(root, engine, override, options = {}) {
   const base = path.dirname(file), errors = [];
   let raw = {}, inventory, physicalBase;
   const failure = () => ({ ...raw, engine, source, platform: raw.platform || host.id, manifest: file, root: base, available: false,
-    validation: windows ? 'structure-and-pe-headers' : 'structure-and-elf-headers', integrityVerified: false, validationErrors: errors,
+    validation: nativeValidation, integrityVerified: false, validationErrors: errors,
     reason: errors.slice(0, 8).join('; ') });
   if (!host.supported || engine === 'x64dbg' && !windows) {
     errors.push(!host.supported ? host.reason : 'x64dbg requires a Windows x64 host; no Android/Linux/iOS native runtime is supported');
@@ -123,7 +155,7 @@ export function readRuntime(root, engine, override, options = {}) {
         if (expected === undefined || expected !== stat.size) throw new Error('file is missing from inventory or has a different byte size');
       }
       if (kind === 'executable') fs.accessSync(value, fs.constants.X_OK);
-      if (bits) windows ? peArchitecture(value, bits) : elfArchitecture(value);
+      if (bits) windows ? peArchitecture(value, bits) : darwin ? machoArchitecture(value) : elfArchitecture(value);
       return value;
     } catch (error) { errors.push(label + ': ' + error.message); return null; }
   };
@@ -152,7 +184,7 @@ export function readRuntime(root, engine, override, options = {}) {
     const stdlib = component(resolved.pythonStdlib, 'Python standard library', 'directory');
     for (const name of ['os.py', 'site.py', 'encodings/__init__.py']) under(stdlib, name, 'Python standard library ' + name);
     component(resolved.pythonModules, 'Python site packages', 'directory');
-    if (!/^_jpype\.cpython-312-aarch64-linux-gnu\.so$/.test(path.basename(resolved.jpypeLibrary || ''))) errors.push('Linux JPype library must match the Python 3.12 AArch64 ABI');
+    if (!/^_jpype\.cpython-312-(?:aarch64-linux-gnu|darwin)\.so$/.test(path.basename(resolved.jpypeLibrary || ''))) errors.push('Linux/macOS JPype library must match the Python 3.12 ABI');
     component(resolved.jpypeLibrary, 'JPype native extension', 'file', 64);
   }
   if (engine === 'ghidra') {
@@ -166,14 +198,14 @@ export function readRuntime(root, engine, override, options = {}) {
         const minimum = Number(app.match(/^application\.java\.min=(\d+)/m)?.[1]);
         const major = Number(jdk.match(/^JAVA_VERSION="(\d+)/m)?.[1]);
         const actualVersion = app.match(/^application\.version=(.+)$/m)?.[1].trim();
-        if (!minimum || !major || major < minimum || !(windows ? /^OS_ARCH="(?:x86_64|amd64)"/m : /^OS_ARCH="(?:aarch64|arm64)"/m).test(jdk)) throw new Error('JDK architecture/version is incompatible with Ghidra');
+        if (!minimum || !major || major < minimum || !(windows ? /^OS_ARCH="(?:x86_64|amd64)"/m : darwin ? /^OS_ARCH="(?:x86_64|amd64)"/m : /^OS_ARCH="(?:aarch64|arm64)"/m).test(jdk)) throw new Error('JDK architecture/version is incompatible with Ghidra');
         if (raw.version && raw.version !== actualVersion) throw new Error('Ghidra application version does not match its manifest');
       } catch (error) { errors.push('Ghidra/JDK metadata: ' + error.message); }
     }
     under(java, windows ? 'bin/java.exe' : 'bin/java', 'JDK java', windows ? 'file' : 'executable', 64);
-    under(java, windows ? 'bin/server/jvm.dll' : 'lib/server/libjvm.so', 'JDK JVM', 'file', 64);
+    under(java, windows ? 'bin/server/jvm.dll' : darwin ? 'lib/server/libjvm.dylib' : 'lib/server/libjvm.so', 'JDK JVM', 'file', 64);
     if (windows) for (const name of ['vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll']) under(java, 'bin/' + name, 'JDK C++ runtime ' + name, 'file', 64);
-    if (!windows) { under(java, 'lib/jli/libjli.so', 'JDK launcher library', 'file', 64); under(java, 'lib/modules', 'JDK runtime modules'); }
+    if (!windows) { under(java, darwin ? 'lib/libjli.dylib' : 'lib/jli/libjli.so', 'JDK launcher library', 'file', 64); under(java, 'lib/modules', 'JDK runtime modules'); }
     under(java, 'jmods/java.base.jmod', 'JDK base module');
     under(java, 'legal', 'JDK licenses', 'directory');
     for (const [suffix, label] of [
@@ -184,7 +216,7 @@ export function readRuntime(root, engine, override, options = {}) {
       ['LICENSE', 'Ghidra license'], ['bom.json', 'Ghidra component inventory'],
     ]) under(ghidra, suffix, label);
     under(ghidra, 'licenses', 'Ghidra third-party licenses', 'directory');
-    under(ghidra, windows ? 'Ghidra/Features/Decompiler/os/win_x86_64/decompile.exe' : 'Ghidra/Features/Decompiler/os/linux_arm_64/decompile', 'Ghidra native decompiler', windows ? 'file' : 'executable', 64);
+    under(ghidra, windows ? 'Ghidra/Features/Decompiler/os/win_x86_64/decompile.exe' : darwin ? 'Ghidra/Features/Decompiler/os/mac_x86_64/decompile' : 'Ghidra/Features/Decompiler/os/linux_arm_64/decompile', 'Ghidra native decompiler', windows ? 'file' : 'executable', 64);
     for (const name of ['pyghidra/__init__.py', 'pyghidra/launcher.py', 'jpype/__init__.py', 'packaging/__init__.py', 'org.jpype.jar']) under(windows ? pythonHome && path.join(pythonHome, 'pylib') : resolved.pythonModules, name, 'Python dependency ' + name);
     if (windows) under(pythonHome, 'pylib/_jpype.cp312-win_amd64.pyd', 'JPype native extension', 'file', 64);
     if (source === 'bundled' && windows) {
@@ -215,7 +247,7 @@ export function readRuntime(root, engine, override, options = {}) {
   }
   under(pythonHome, 'LICENSE.txt', 'Python license');
   return { ...resolved, available: errors.length === 0, portable: errors.length === 0,
-    validation: windows ? 'structure-and-pe-headers' : 'structure-and-elf-headers', integrityVerified: false, validationErrors: errors,
+    validation: nativeValidation, integrityVerified: false, validationErrors: errors,
     ...(errors.length ? { reason: errors.slice(0, 8).join('; ') } : {}) };
 }
 

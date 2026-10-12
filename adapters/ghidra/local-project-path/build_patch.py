@@ -190,7 +190,8 @@ def main():
     classes = build / 'classes'
     classes.mkdir()
     classpath = os.pathsep.join(str(file).replace('\\', '/') for file in sorted(ghidra_home.rglob('*.jar')))
-    javac = java_home / 'bin/javac.exe'
+    # The bundled JDK uses javac.exe on Windows and a plain launcher elsewhere.
+    javac = java_home / ('bin/javac.exe' if os.name == 'nt' else 'bin/javac')
     javac_args = ['--release', '21', '-encoding', 'UTF-8', '-proc:none', '-classpath', classpath,
                   '-d', str(classes).replace('\\', '/'), str(java_file).replace('\\', '/')]
     argfile = build / 'javac.args'
