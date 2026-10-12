@@ -1,6 +1,31 @@
 # ⚒️ DeepSeek Harness AI 驱动专业逆向工作台（无限五代 ∞ IG5）v1.0.0
 （本工具仅限用于合法授权的软件逆向工程、安全审计与学术研究）
 
+> ## 🍎 macOS Intel (darwin-x64) 分支
+>
+> 本仓库是 [Minglink/dsh-infinite-gen-5](https://github.com/Minglink/dsh-infinite-gen-5)
+> 的 fork，为 **macOS Intel** 增加了完整的分析与调试能力。
+>
+> | 引擎 | 状态 | 说明 |
+> | --- | --- | --- |
+> | `reverse` / `ghidra` | ✅ | 静态分析，本地构建运行时（Ghidra 12.1.4 + 自编译 mac_x86_64 decompiler） |
+> | `lldb` | ✅ | 原生调试，复用 Xcode 的 LLDB（新增后端） |
+> | `x64dbg` | ❌ | Windows 专属 |
+> | `ig5_emulate` | ❌ | 随包 Unicorn 仅 Windows DLL |
+>
+> **安装（macOS）**：不要用 `install.ps1`（硬校验 `win32-x64`）。
+>
+> ```bash
+> git clone https://github.com/pyt111/dsh-infinite-gen-5.git
+> # 按 docs/DARWIN_X64.md §4 构建 runtimes/darwin-x64/（约 1.3 GB）
+> rsync -av --delete --exclude='runtimes' --exclude='third_party' \
+>       --exclude='.git' --exclude='.ig5-local' ./ ~/.dsh/plugins/dsh-infinite-gen-5/
+> ./verify-darwin.sh --plugin      # 自检
+> ```
+>
+> **文档**：[平台适配](docs/DARWIN_X64.md) · [lldb 调试车道](docs/LLDB_LANE.md) · [实验记录](docs/DARWIN_X64_NOTES.md) · [维护速查](.ig5-local/README.md)
+>
+> 上游同步：`./sync-upstream.sh`（rebase 到 `darwin-x64` 分支）
 
 首次使用：从 [Windows x64 完整包发布页](https://github.com/Minglink/dsh-infinite-gen-5/releases/latest) 下载完整 Windows ZIP → 完整解压 → 运行 & .\plugin\install.ps1 → 重启 DSH → /ig5 engines → /ig5 open --engine ghidra <路径>。完整包默认离线安装；旧附件不会自动获得新安装器修复。使用 [最新源码 ZIP](https://github.com/Minglink/dsh-infinite-gen-5/archive/refs/heads/master.zip) 或 git clone 时，可在源码根目录运行 & .\install.ps1，安装器检查源码与 DSH profile 后下载固定资产，只补齐运行时和上游源码，保留当前代码。高级功能通过 /ig5 toolset full 展开。
 

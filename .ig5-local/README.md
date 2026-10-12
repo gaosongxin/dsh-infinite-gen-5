@@ -1,28 +1,48 @@
-# darwin-x64 维护说明
+# darwin-x64 维护速查
 
-本仓库是 [Minglink/dsh-infinite-gen-5](https://github.com/Minglink/dsh-infinite-gen-5)
-的 fork，用于在 **macOS Intel (darwin-x64)** 上运行 IG5。
+本 fork 为 **macOS Intel (darwin-x64)** 增加了分析与调试能力。
 
-## 仓库结构
+- 仓库：<https://github.com/pyt111/dsh-infinite-gen-5>（fork of Minglink/dsh-infinite-gen-5）
+- 本地：`~/DshWorkspace/dsh-infinite-gen-5`
+- 部署：`~/.dsh/plugins/dsh-infinite-gen-5`
+- 详细文档：[docs/DARWIN_X64.md](../docs/DARWIN_X64.md) · [docs/LLDB_LANE.md](../docs/LLDB_LANE.md)
+
+---
+
+## 分支
+
+`master` 与 `darwin-x64` 内容一致。`master` 便于 clone 即用，
+`darwin-x64` 用于 rebase 上游。
+
+---
+
+## 与上游的差异
 
 ```
-pyt111/dsh-infinite-gen-5          ← fork
-├── master          ← 带 darwin-x64 补丁（日常使用）
-└── darwin-x64      ← 同上（上游同步工作分支）
+ .ig5-local/README.md                              |  96 ++
+ adapters/ghidra/local-project-path/build_patch.py |   3 +-
+ adapters/lldb/adapter.py                          | 952 ++++++++++++++++++++++
+ engine_runtime.js                                 |  87 +-
+ index.js                                          |  77 +-
+ runtimes/darwin-x64/lldb/bin/ig5-lldb-python      |  26 +
+ runtimes/darwin-x64/lldb/runtime.json             |  17 +
+ source/host_platform.js                           |   6 +-
+ source/worker_transport.js                        |  11 +-
+ sync-upstream.sh                                  |  80 ++
+ docs/DARWIN_X64.md                                | 新增
+ docs/LLDB_LANE.md                                 | 新增
 ```
-
-两个分支内容一致。`master` 便于 clone 即用，`darwin-x64` 用于 rebase 上游。
-
-## 与上游的差异（4 个文件）
 
 | 文件 | 改动 |
-|---|---|
-| `source/host_platform.js` | 平台白名单加 `darwin-x64`；补 darwin reason 文案 |
-| `engine_runtime.js` | 新增 `machoArchitecture()`；拆出 darwin 分支（JDK dylib / mac_x86_64 decompiler / OS_ARCH=x86_64 / JPype darwin ABI / validation 标签） |
-| `source/worker_transport.js` | `detached: true` 进程组从 linux 扩到 darwin |
-| `adapters/ghidra/local-project-path/build_patch.py` | `javac` 按 `os.name` 选 `.exe` |
+| --- | --- |
+| `source/host_platform.js` | 白名单加 `darwin-x64` |
+| `engine_runtime.js` | `machoArchitecture()`；darwin 分支（JDK dylib / mac_x86_64 decompiler / JPype darwin ABI）；lldb 引擎注册 |
+| `source/worker_transport.js` | posix 进程组从 linux 扩到 darwin；lldb 环境变量 |
+| `index.js` | `DEBUG_ENGINES` 集合；`defaultDebugger` 平台选择；`ig5_dbg` 支持 lldb |
+| `adapters/ghidra/local-project-path/build_patch.py` | javac 按平台选 `.exe` |
+| `adapters/lldb/adapter.py` | lldb 调试后端（新增） |
 
-另加 `sync-upstream.sh`（上游同步脚本）。
+---
 
 ## 上游同步
 
@@ -30,67 +50,111 @@ pyt111/dsh-infinite-gen-5          ← fork
 cd ~/DshWorkspace/dsh-infinite-gen-5
 ./sync-upstream.sh --check    # 只看上游有什么新提交
 ./sync-upstream.sh            # 拉取并 rebase
+./sync-upstream.sh --merge    # 保留分叉历史
 ```
 
-冲突时停在 rebase 中间，手动处理后 `git add <file> && git rebase --continue`。
-
-## 部署到 DSH
+冲突时停在 rebase 中间：
 
 ```bash
-rsync -av --delete --exclude='runtimes' --exclude='third_party' \
+git add <file> && git rebase --continue
+# 或放弃
+git rebase --abort
+```
+
+---
+
+## 部署
+
+```bash
+rsync -av --delete \
+      --exclude='runtimes' --exclude='third_party' \
       --exclude='.git' --exclude='.ig5-local' \
-      ~/DshWorkspace/dsh-infinite-gen-5/ ~/.dsh/plugins/dsh-infinite-gen-5/
+      ~/DshWorkspace/dsh-infinite-gen-5/ \
+      ~/.dsh/plugins/dsh-infinite-gen-5/
 
 # 重启 DSH（无 --expose-internals，代码不热加载）
-# 然后 ig5_doctor 确认 runtimeReady / startupVerified
+# ig5_doctor 确认 runtimeReady / startupVerified
 ```
 
-**关键**：`--exclude='runtimes'` 保住 1.3G 自建运行时（含本地编译的
-`mac_x86_64/decompile` 与 `.dsh` 路径补丁），`--exclude='third_party'`
-保住补丁基准源码。
+**关键**：`--exclude='runtimes'` 保住 1.3 GB 自建运行时，
+`--exclude='third_party'` 保住补丁基准源码。
 
-## 运行时包（不入库，本地构建）
+---
 
-`runtimes/darwin-x64/` 1.3G：
+## 运行时
 
-- Ghidra 12.1.4 PUBLIC（官方）
-- `mac_x86_64/decompile` + `sleigh` — 官方源码 + Apple clang 编译
-- Temurin JDK 21.0.12.1 x86_64
-- CPython 3.12.15 + PyGhidra 3.1.0 + JPype 1.5.2（Ghidra 自带 pypkg）
-- `ig5-ghidra-local-project-path-v1` 补丁（让 `.dsh` 路径可用）
+```
+runtimes/darwin-x64/
+├── manifest.json                    8168 个文件 SHA-256 清单
+├── ghidra/                          1.3 GB
+│   ├── ghidra_12.1.4_PUBLIC/        含本地编译的 os/mac_x86_64/{decompile,sleigh}
+│   ├── jdk-21.0.12.1+1/             Temurin JDK 21 x86_64
+│   └── python/                      CPython 3.12.15 + PyGhidra 3.1.0 + JPype 1.5.2
+└── lldb/
+    ├── runtime.json
+    └── bin/ig5-lldb-python
+```
 
-### 重建步骤
+重建步骤见 [docs/DARWIN_X64.md §4](../docs/DARWIN_X64.md)。
+
+**改动运行时后必须重新生成 manifest.json**，否则 inventory 校验会因
+字节数不符拒绝加载。
+
+---
+
+## 日常操作
 
 ```bash
-# 1. 下载
-curl -L -o ghidra.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.4_build/ghidra_12.1.4_PUBLIC_20260921.zip
-curl -L -o jdk.tar.gz "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_mac_hotspot_21.0.12.1_1.tar.gz"
+# 语法检查
+node --check engine_runtime.js && node --check index.js && \
+node --check source/host_platform.js && node --check source/worker_transport.js
+python3 -m py_compile adapters/lldb/adapter.py
 
-# 2. 解压到 runtimes/darwin-x64/ghidra/
-# 3. 编译 native decompiler
-cd runtimes/darwin-x64/ghidra/ghidra_12.1.4_PUBLIC/Ghidra/Features/Decompiler/src/decompile/cpp
-make ghidra_opt -j4 && make sleigh_opt -j4
-mkdir -p ../../os/mac_x86_64
-cp ghidra_opt ../../os/mac_x86_64/decompile
-cp sleigh_opt ../../os/mac_x86_64/sleigh
+# 验证运行时
+node -e "import('./engine_runtime.js').then(m => {
+  const c = m.runtimeConfiguration({});
+  console.log('ghidra:', c.ghidra.available, '| lldb:', c.lldb.available);
+})"
 
-# 4. Python 运行时（用 Ghidra 自带 wheel，版本必须配对）
-#    装到 runtimes/darwin-x64/ghidra/python/
-#    Ghidra/Features/PyGhidra/pypkg/dist/{jpype1-1.5.2-cp312-*,packaging-25.0-*,pyghidra-3.1.0-*}.whl
-
-# 5. 打项目路径补丁
-runtimes/darwin-x64/ghidra/python/bin/python3.12 -I -B \
-  adapters/ghidra/local-project-path/build_patch.py \
-  --project <repo> --runtime-root <repo>/runtimes/darwin-x64/ghidra \
-  --artifact-root ~/.dsh/ig5/artifacts/ghidra-local-project-path-build
-
-# 6. 重新生成 manifest.json（8155+ 个文件的 SHA-256 清单）
+# 重新生成清单（改运行时后）
+cd runtimes/darwin-x64 && python3 - <<'PY'
+import os, json, hashlib
+root = os.getcwd(); files = []
+for dirpath, _, filenames in os.walk(root):
+    for name in filenames:
+        full = os.path.join(dirpath, name)
+        rel = os.path.relpath(full, root).replace('\\', '/')
+        if os.path.islink(full): continue
+        h = hashlib.sha256()
+        with open(full, 'rb') as fh:
+            for c in iter(lambda: fh.read(1 << 20), b''): h.update(c)
+        files.append({'path': rel, 'bytes': os.path.getsize(full), 'sha256': h.hexdigest()})
+files.sort(key=lambda e: e['path'])
+json.dump({'schemaVersion': 1, 'pluginVersion': '1.0.0', 'platform': 'darwin-x64',
+           'engines': ['ghidra', 'lldb'], 'files': files},
+          open('manifest.json', 'w', encoding='utf-8'), ensure_ascii=False, separators=(',', ':'))
+print('文件数:', len(files))
+PY
 ```
+
+---
 
 ## 注意事项
 
-- **不要用官方 `install.ps1`** — 它硬性要求 `platform == 'win32-x64'` 且
-  `engines` 含 `x64dbg`，会直接 throw。
-- **x64dbg 不可用** — Windows 专属，`ig5_doctor` 的 `unsupported` 里明确标注。
-- **`ig5_emulate` 不可用** — 依赖随包 Unicorn native 运行时（仅 Windows DLL）。
-- **Ghidra 版本升级** — 若上游把 Ghidra 从 12.1.4 升级，需要按上面第 2-6 步重建运行时。
+- **不要用官方 `install.ps1`** — 硬性要求 `platform == 'win32-x64'` 且
+  `engines` 含 `x64dbg`，遇到 darwin 运行时直接 throw。
+- **x64dbg 不可用** — Windows 专属。
+- **`ig5_emulate` 不可用** — 随包 Unicorn 是 Windows DLL。
+- **Ghidra 升级需重建运行时** — `engine_runtime.js` 会核对清单版本与实际版本。
+- **SIP 保护的目标** — `ig5_dbg op=start ... prepare=true` 自动处理，
+  详见 [docs/LLDB_LANE.md §4](../docs/LLDB_LANE.md)。
+
+---
+
+## 备份位置
+
+```
+~/ig5-darwin-backup/.ig5-local/    改动补丁（git 之外的第二份）
+```
+
+改动的权威来源是 git 分支，备份目录仅作应急。
