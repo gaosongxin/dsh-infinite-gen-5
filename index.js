@@ -379,6 +379,8 @@ class WorkerManager {
     }
     if (['load', 'start'].includes(params.op)) {
       const executedPath = params.path || session.target;
+      // The adapter may re-sign a *copy* for macOS targets; the path the caller
+      // names here is always the original, unchanged image.
       if (createHash('sha256').update(fs.readFileSync(executedPath)).digest('hex') !== session.sha256) {
         throw new Error('Debug target differs from the opened artifact; open that target explicitly before execution');
       }
@@ -1749,7 +1751,7 @@ function defineIg5Tools(ctx, mgr, cfg) {
           target: { type: 'string', description: 'Target path previously opened with ig5_open' },
           op: {
             type: 'string',
-            description: 'load | start | bpt | unbpt | regs | setreg | threads | callstack | modules | state | event | step | stepover | trace | cont | suspend | readmem | writemem | stop',
+            description: 'load | start | bpt | unbpt | regs | setreg | threads | callstack | modules | state | event | step | stepover | trace | cont | suspend | readmem | writemem | stop | signature | prepare',
           },
           kind: { type: 'string', enum: ['software', 'hardware'], default: 'software', description: 'Breakpoint kind for bpt/unbpt' },
           access: { type: 'string', enum: ['execute', 'write', 'readwrite'], default: 'execute', description: 'Hardware breakpoint access' },
@@ -1762,7 +1764,9 @@ function defineIg5Tools(ctx, mgr, cfg) {
           ea: { type: 'string', description: 'Hex address (bpt/unbpt/readmem/writemem)' },
           rva: { type: 'string', description: 'Explicit main-module RVA for x64dbg; mapped against the current loaded module' },
           address_space: { type: 'string', enum: ['runtime', 'database', 'rva'], description: 'Explicit address interpretation for x64dbg ea; default runtime' },
-          max_steps: { type: 'number', description: 'Bounded x64dbg single-step trace budget' },
+          max_steps: { type: 'number', description: 'Bounded single-step trace budget (x64dbg and lldb)' },
+          prepare: { type: 'boolean', description: 'lldb only: when the target is code-signed without the debugging entitlement, run a re-signed copy instead of failing. The original file is never modified.' },
+          prepare_to: { type: 'string', description: 'lldb only: destination file or directory for the re-signed copy (default: a fresh temporary directory)' },
           expected: { type: 'string', description: 'Optional original register or memory value checked before modification' },
           size: { type: 'number', description: 'Memory byte count (default 64); hardware bpt size 1|2|4|8, execute requires 1' },
           hex: { type: 'string', description: 'Byte payload (writemem)' },

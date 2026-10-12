@@ -18,19 +18,126 @@ import contextlib
 import hashlib
 import json
 import os
+import plistlib
 import queue
+import shutil
 import struct
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from pathlib import Path
 
+# macOS refuses ptrace attach to platform-signed binaries unless the image
+# carries this entitlement. Unsigned local builds and already-prepared copies
+# are unaffected, so the check below only fires when it is actually needed.
+GET_TASK_ALLOW = "com.apple.security.get-task-allow"
+
+
+def signature_state(path):
+    """Report whether LLDB can attach to `path` without re-signing.
+
+    Returns one of:
+      unsigned  - no code signature; the kernel allows debugging it
+      debuggable- signed and already carrying get-task-allow
+      protected - signed without get-task-allow (typically Apple-signed)
+      unknown   - codesign could not report; callers must not guess
+    """
+    try:
+        described = subprocess.run(["codesign", "-dv", str(path)],
+                                   capture_output=True, encoding="utf-8", errors="replace", timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    report = (described.stdout or "") + (described.stderr or "")
+    if "not signed at all" in report:
+        return "unsigned"
+    if described.returncode != 0 and "code object is not signed" not in report:
+        return "unknown"
+    try:
+        entitlements = subprocess.run(["codesign", "-d", "--entitlements", "-", str(path)],
+                                      capture_output=True, encoding="utf-8", errors="replace", timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    text = (entitlements.stdout or "") + (entitlements.stderr or "")
+    if GET_TASK_ALLOW in text:
+        return "debuggable"
+    # A signature that is present but reports no entitlements is protected.
+    return "protected"
+
+
+def prepare_target(path, destination=None):
+    """Copy a protected image and re-sign it so LLDB may attach.
+
+    The original file is never modified: re-signing an Apple binary in place
+    invalidates its seal and can break the rest of the system. The copy keeps
+    the original bytes and only gains the debugging entitlement.
+    """
+    source = Path(path).expanduser().resolve(strict=True)
+    state = signature_state(source)
+    if state in ("unsigned", "debuggable"):
+        return {"prepared": False, "state": state, "path": str(source), "reason": "already debuggable"}
+    if state == "unknown":
+        raise RpcError("ESIGNATURE", "codesign could not classify the target; prepare it manually before debugging")
+
+    if destination:
+        out = Path(destination).expanduser()
+        if out.is_dir():
+            out = out / (source.name + "-ig5dbg")
+    else:
+        out = Path(tempfile.mkdtemp(prefix="ig5-lldb-")) / (source.name + "-ig5dbg")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, out)
+    # copyfile does not carry the mode; without the executable bit the kernel
+    # refuses to launch the copy even when the signature is valid.
+    shutil.copymode(source, out)
+    out.chmod(out.stat().st_mode | 0o111)
+    # Hash the copy before touching its signature. This equals the original's
+    # digest, which is the host's proof that the prepared image is the very
+    # binary the caller opened rather than something else on the same path.
+    sha_before = hashlib.sha256(out.read_bytes()).hexdigest()
+    if sha_before != hashlib.sha256(source.read_bytes()).hexdigest():
+        raise RpcError("ESIGNATURE", "copied image does not match the original bytes; refusing to sign")
+    # The copy inherits the original extended attributes and signature; both
+    # must go before an ad-hoc signature can be applied.
+    with contextlib.suppress(OSError):
+        subprocess.run(["xattr", "-c", str(out)], capture_output=True, timeout=20)
+    removed = subprocess.run(["codesign", "--remove-signature", str(out)],
+                             capture_output=True, encoding="utf-8", errors="replace", timeout=30)
+    if removed.returncode != 0 and "not signed" not in ((removed.stderr or "") + (removed.stdout or "")):
+        raise RpcError("ESIGNATURE", f"failed to strip the original signature: {(removed.stderr or '').strip()[:300]}")
+
+    entitlements = out.parent / "ig5-debug-entitlements.plist"
+    with entitlements.open("wb") as stream:
+        plistlib.dump({GET_TASK_ALLOW: True}, stream)
+    signed = subprocess.run(["codesign", "--force", "--sign", "-", "--entitlements", str(entitlements), str(out)],
+                            capture_output=True, encoding="utf-8", errors="replace", timeout=60)
+    if signed.returncode != 0:
+        raise RpcError("ESIGNATURE", f"ad-hoc signing failed: {(signed.stderr or '').strip()[:300]}")
+    with contextlib.suppress(OSError):
+        subprocess.run(["xattr", "-c", str(out)], capture_output=True, timeout=20)
+    verified = signature_state(out)
+    if verified != "debuggable":
+        raise RpcError("ESIGNATURE", f"re-signed copy does not report {GET_TASK_ALLOW}; refusing to launch")
+    return {"prepared": True, "state": verified, "original": str(source), "path": str(out),
+            # imageSha256 is the payload identity: it equals the original's
+            # digest and is what the host compares against the opened artifact.
+            # signingSha256 covers the whole file after signing and therefore
+            # differs, because the ad-hoc signature is appended to the image.
+            "imageSha256": sha_before,
+            "signingSha256": hashlib.sha256(out.read_bytes()).hexdigest(),
+            "originalSha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            "note": "the copy keeps the original payload bytes; only the appended code signature differs"}
+
 OPS = ["load", "start", "bpt", "unbpt", "regs", "setreg", "step", "stepover",
        "cont", "suspend", "readmem", "writemem", "stop", "state", "event",
-       "modules", "trace", "threads", "callstack"]
+       "modules", "trace", "threads", "callstack",
+       # signature inspection and target preparation for SIP-protected images
+       "signature", "prepare"]
 CAPABILITIES = ["doctor", "open", "close", "dbg", *["dbg." + op for op in OPS],
-                "dbg.hardware_breakpoint", "dbg.thread_return", "dbg.memory_regions", "cancel"]
+                "dbg.hardware_breakpoint", "dbg.thread_return", "dbg.memory_regions",
+                "dbg.signature", "dbg.prepare", "cancel"]
 
 # Mach-O CPU types we accept as launch targets.
 CPU_TYPE_X86_64 = 0x01000007
@@ -545,18 +652,72 @@ class Adapter:
                 self.target = target
             if self.target is None:
                 raise RpcError("ETARGET", "no target path provided and none loaded")
+            # macOS refuses ptrace attach to platform-signed images. Report the
+            # classification instead of launching something that cannot be
+            # attached, so the caller can decide rather than read a kernel error.
+            prepared = None
+            state = signature_state(self.target["path"])
+            if state == "protected":
+                if p.get("prepare"):
+                    prepared = prepare_target(self.target["path"], p.get("prepare_to"))
+                    self.target = inspect_macho(prepared["path"])
+                else:
+                    return {"ok": False, "op": op, "error": "target is code-signed without the debugging entitlement",
+                            "code": "ESIGNATURE", "signature": state, "path": self.target["path"],
+                            "remedy": "call again with prepare=true to run the target from a re-signed copy",
+                            "prepareAvailable": True, **self.state()}
             self.launch()
             self.run_id, self.stop_seq = uuid.uuid4().hex, 0
             with self.event_lock:
                 self.events.clear()
-            self.client.start_target(self.target["path"], p.get("args", ""),
-                                     p.get("dir") or str(Path(self.target["path"]).parent))
+            try:
+                # `prepare_to` may name the destination file itself, so the
+                # default working directory must come from the parent, never
+                # from the image path.
+                working = p.get("dir") or str(Path(self.target["path"]).parent)
+                if not Path(working).is_dir():
+                    raise RpcError("EINVAL", f"working directory is not a directory: {working}")
+                self.client.start_target(self.target["path"], p.get("args", ""), working)
+            except RpcError as error:
+                if error.code == "ELAUNCH":
+                    # The kernel can still refuse a signature that looked fine,
+                    # e.g. a hardened runtime without the entitlement honoured.
+                    return {"ok": False, "op": op, "error": str(error), "code": "ESIGNATURE",
+                            "signature": signature_state(self.target["path"]), "path": self.target["path"],
+                            "remedy": "call again with prepare=true to run the target from a re-signed copy",
+                            "prepareAvailable": True, **self.state()}
+                raise
             st = self.state()
             if st["state"] == "exited":
                 self.record_event("process-exited")
                 return {"ok": False, "op": op, "error": "process exited before any stop", **st}
             self.record_event("process-started", {"pid": st.get("pid")})
-            return {"ok": True, "op": op, **st, "context": self.context()}
+            result = {"ok": True, "op": op, **st, "context": self.context()}
+            if prepared:
+                result["signature"] = {"prepared": True, "path": prepared["path"],
+                                       "original": prepared["original"], "state": prepared["state"],
+                                       "note": prepared["note"]}
+            return result
+
+        if op == "signature":
+            # Read-only probe: classify a target without loading or launching it.
+            path = p.get("path") or (self.target or {}).get("path")
+            if not path:
+                raise RpcError("ETARGET", "signature requires a path or a registered target")
+            resolved = Path(path).expanduser().resolve(strict=True)
+            state = signature_state(resolved)
+            return {"ok": True, "op": op, "path": str(resolved), "signature": state,
+                    "debuggable": state in ("unsigned", "debuggable"),
+                    "prepareAvailable": state == "protected"}
+
+        if op == "prepare":
+            path = p.get("path") or (self.target or {}).get("path")
+            if not path:
+                raise RpcError("ETARGET", "prepare requires a path or a registered target")
+            prepared = prepare_target(path, p.get("destination"))
+            if p.get("register", True):
+                self.target = inspect_macho(prepared["path"])
+            return {"ok": True, "op": op, "signature": prepared}
 
         if self.client is None:
             raise RpcError("ESTATE", "debugger is not loaded")
