@@ -530,7 +530,11 @@
           return i >= 0 ? s.slice(i + 1) : s;
         }
 
-        function engineName(engine) { return engine === "ghidra" ? "Ghidra" : engine === "x64dbg" ? "x64dbg" : "Reverse"; }
+        function engineName(engine) { return engine === "ghidra" ? "Ghidra" : engine === "x64dbg" ? "x64dbg" : engine === "lldb" ? "lldb" : "Reverse"; }
+        // Debugger lanes own a live process; both x64dbg (Windows) and lldb
+        // (macOS) register here, so the workbench never hardcodes one of them.
+        var DEBUG_ENGINES = ["x64dbg", "lldb"];
+        function isDebugEngine(engine) { return DEBUG_ENGINES.indexOf(engine) !== -1; }
         function sessionIdentity(session) { return JSON.stringify([session.key || "", session.target || "", session.engine || "reverse"]); }
         function parseWorkbenchFocus(value) {
           if (typeof value !== "string" || value.length > 8192) return null;
@@ -876,7 +880,7 @@
           var setActiveTab = activeTabState[1];
 
           var allSessions = (feed && feed.sessions) || [];
-          var sessions = allSessions.filter(function (s) { return s.alive && s.engine !== "x64dbg"; });
+          var sessions = allSessions.filter(function (s) { return s.alive && !isDebugEngine(s.engine); });
           var currentTargetState = react.useState(null);
           var selectedIdentity = currentTargetState[0];
           var setSelectedIdentity = currentTargetState[1];
@@ -955,7 +959,7 @@
             activeTab === "scan" && el(Ig5ScanView, { key: viewKey, target: selectedTarget, engine: engine, session: currentSession }),
             activeTab === "analysis" && el(Ig5AnalysisView, { key: viewKey, target: selectedTarget, engine: engine, inputActions: props.inputActions }),
             activeTab === "patches" && el(Ig5PatchesView, { key: viewKey, target: selectedTarget, engine: engine }),
-            activeTab === "runtime" && el(Ig5RuntimeView, { sessions: allSessions.filter(function (s) { return s.engine === "x64dbg"; }), refresh: feed && feed.now }),
+            activeTab === "runtime" && el(Ig5RuntimeView, { sessions: allSessions.filter(function (s) { return isDebugEngine(s.engine); }), refresh: feed && feed.now }),
             activeTab === "tools" && el(Ig5ToolsMatrixView, { dash: dash, session: currentSession, feed: feed })
           );
         }
@@ -991,16 +995,20 @@
             var alive = true;
             if (!session) { setState({ scope: scopeKey, loading: false, data: null, error: null }); return; }
             setState(function (old) { return { scope: scopeKey, loading: true, data: old.scope === scopeKey ? old.data : null, error: null }; });
-            readData("debug_state", session.target, {}, "x64dbg").then(function (data) { if (alive) setState({ scope: scopeKey, loading: false, data: data, error: null }); }).catch(function (error) { if (alive) setState({ scope: scopeKey, loading: false, data: null, error: String(error.message || error) }); });
+            readData("debug_state", session.target, {}, session.engine).then(function (data) { if (alive) setState({ scope: scopeKey, loading: false, data: data, error: null }); }).catch(function (error) { if (alive) setState({ scope: scopeKey, loading: false, data: null, error: String(error.message || error) }); });
             return function () { alive = false; };
           }, [scopeKey, props.refresh]);
           var visibleState = state.scope === scopeKey ? state : { loading: !!session, data: null, error: null };
           var data = visibleState.data || {};
           return el("div", { className: "ig5-card" },
-            el("div", { className: "ig5-card-title" }, el("b", null, "x64dbg · 最近运行态快照"), el("span", { className: "ig5-chip read" }, "只读缓存")),
+            el("div", { className: "ig5-card-title" }, el("b", null, (session ? engineName(session.engine) : "调试器") + " · 最近运行态快照"), el("span", { className: "ig5-chip read" }, "只读缓存")),
             el("p", { className: "ig5-card-sub" }, "此页只读取已记录的状态，不启动、继续、附加或修改样本。运行控制仍需会话中的明确操作与宿主审批。"),
             sessions.length > 1 ? el("select", { className: "ig5-select", "aria-label": "运行态会话", value: sessionIdentity(session), onChange: function (e) { setSelected(e.target.value); } }, sessions.map(function (item) { return el("option", { key: sessionIdentity(item), value: sessionIdentity(item) }, basename(item.target)); })) : null,
-            !session ? el("p", { className: "ig5-card-sub" }, "没有已登记的 x64dbg 运行态会话。") : el("p", { className: "ig5-mono" }, basename(session.target) + " · " + (typeof data.state === "string" ? data.state : "状态见快照") + " · run " + (data.runId || "—") + " · stop " + (data.stopSeq == null ? "—" : data.stopSeq)),
+            !session ? el("div", null,
+              el("p", { className: "ig5-card-sub" }, "没有正在登记的调试会话。"),
+              el("p", { className: "ig5-card-sub" }, "本页只做只读投影：运行控制（启动 / 断点 / 单步 / 停止）需要在会话中调用 ig5_dbg，并经过宿主审批。"),
+              el("p", { className: "ig5-mono" }, "macOS 用法：ig5_dbg op=start backend=lldb path=<目标> prepare=true"),
+              el("p", { className: "ig5-mono" }, "Windows 用法：ig5_dbg op=start backend=x64dbg path=<目标>")) : el("p", { className: "ig5-mono" }, basename(session.target) + " · " + engineName(session.engine) + " · " + (typeof data.state === "string" ? data.state : "状态见快照") + " · run " + (data.runId || "—") + " · stop " + (data.stopSeq == null ? "—" : data.stopSeq)),
             visibleState.loading ? el("p", { role: "status" }, "读取最近快照…") : null,
             visibleState.error ? el("p", { className: "ig5-error", role: "alert" }, visibleState.error) : null,
             data.note ? el("p", { className: "ig5-card-sub" }, data.note) : null,
@@ -2306,7 +2314,7 @@
                 el("span", { className: "ig5-chip read ig5-mono" }, totalTools + " Tools · 完整目录")
               ),
               el("p", { className: "ig5-card-sub" }, "工具注册遵循宿主配置：core 默认提供 8 个入口，full 提供完整工具面。目录数量不代表当前会话已注册数量；请以 ig5_profile 返回的实际工具列表为准。"),
-              el("p", { className: "ig5-card-sub" }, "默认 Reverse 内置核心与随包 Ghidra / x64dbg 提供静态分析与调试。五代核心已提供独立文件加载、原生 IR/CFG、RTTI 与真实 C 反编译；使用 ig5_ir level=kernel 无需启动 Java 或商业引擎，action=decompile 选择 C 输出。原生解码与反编译保留开源 Ghidra 核心来源。跳转表读取、修复与虚表分析也支持 Ghidra。ig5_microcode 返回实际 IG5/Ghidra IR 与优化记录；ig5_run_idapython 提供有界兼容 API，支持范围见返回结果。ig5_sync 需要两个静态数据库，Reverse 与 Ghidra 会话分别持有独立数据库。实际支持以当前后端 capabilities 为准。"),
+              el("p", { className: "ig5-card-sub" }, "默认 Reverse 内置核心与随包 Ghidra 提供静态分析；调试车道按平台选择：Windows 用随包 x64dbg，macOS 用本机 Xcode 的 lldb。五代核心已提供独立文件加载、原生 IR/CFG、RTTI 与真实 C 反编译；使用 ig5_ir level=kernel 无需启动 Java 或商业引擎，action=decompile 选择 C 输出。原生解码与反编译保留开源 Ghidra 核心来源。跳转表读取、修复与虚表分析也支持 Ghidra。ig5_microcode 返回实际 IG5/Ghidra IR 与优化记录；ig5_run_idapython 提供有界兼容 API，支持范围见返回结果。ig5_sync 需要两个静态数据库，Reverse 与 Ghidra 会话分别持有独立数据库。实际支持以当前后端 capabilities 为准。"),
               el(
                 "div",
                 { style: { marginBottom: 12 } },

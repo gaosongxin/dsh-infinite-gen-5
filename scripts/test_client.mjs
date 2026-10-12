@@ -575,6 +575,27 @@ test('runtime view reads cached debug_state only and escapes register values', a
   assert.ok(urls.every(url => { const q = new URL(url, 'http://test').searchParams; return q.get('type') === 'debug_state' && q.get('engine') === 'x64dbg'; })); h.unmount();
 });
 
+// The macOS lane must reach the same read-only projection: the view follows the
+// session's own engine instead of assuming the Windows debugger.
+test('runtime view follows the lldb lane on macOS sessions', async () => {
+  const urls = [];
+  request = (url, options) => { urls.push(url); assert.equal(options, undefined); return Promise.resolve(response({ state: 'suspended', runId: 'run_lldb', stopSeq: 0, pid: 4242 })); };
+  const h = harness(ui.RuntimeView, { sessions: [{ key: 'y', target: '/bin/ls', engine: 'lldb' }], refresh: 1 }); h.render(); await settle(); h.render();
+  assert.match(text(h.tree), /lldb/); assert.match(text(h.tree), /run_lldb/);
+  assert.ok(urls.every(url => { const q = new URL(url, 'http://test').searchParams; return q.get('type') === 'debug_state' && q.get('engine') === 'lldb'; }), 'runtime view must request the session engine, not a fixed one');
+  h.unmount();
+});
+
+test('runtime view without a debug session explains how to start one', async () => {
+  request = () => Promise.resolve(response({}));
+  const h = harness(ui.RuntimeView, { sessions: [], refresh: 1 }); h.render(); await settle(); h.render();
+  const body = text(h.tree);
+  assert.match(body, /没有正在登记的调试会话/);
+  assert.match(body, /backend=lldb/, 'macOS guidance must be visible');
+  assert.match(body, /backend=x64dbg/, 'Windows guidance must be visible');
+  h.unmount();
+});
+
 test('Ghidra IR selection requests explicit level and keeps source distinct', async () => {
   const urls = [];
   request = url => { urls.push(url); return Promise.resolve(response({ kind: 'pcode', operations: ['COPY r0, 1'] })); };
