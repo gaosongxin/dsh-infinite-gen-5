@@ -17,11 +17,17 @@
 >
 > ```bash
 > git clone https://github.com/pyt111/dsh-infinite-gen-5.git
-> # 按 docs/DARWIN_X64.md §4 构建 runtimes/darwin-x64/（约 1.3 GB）
-> rsync -av --delete --exclude='runtimes' --exclude='third_party' \
->       --exclude='.git' --exclude='.ig5-local' ./ ~/.dsh/plugins/dsh-infinite-gen-5/
-> ./verify-darwin.sh --plugin      # 自检
+> cd dsh-infinite-gen-5
+> ./install-darwin.sh          # 一键安装：构建运行时 + 部署 + 注册 + 自检
 > ```
+>
+> 已有装好的机器？用 `--reuse` 跳过下载与编译（约 20 秒）：
+>
+> ```bash
+> ./install-darwin.sh --reuse /path/to/existing/.dsh/plugins/dsh-infinite-gen-5
+> ```
+>
+> 装完重启 DSH 即可使用。`./verify-darwin.sh --plugin` 可随时自检。
 >
 > **文档**：[平台适配](docs/DARWIN_X64.md) · [lldb 调试车道](docs/LLDB_LANE.md) · [实验记录](docs/DARWIN_X64_NOTES.md) · [维护速查](.ig5-local/README.md)
 >

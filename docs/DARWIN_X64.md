@@ -228,6 +228,31 @@ PY
 
 ## 五、部署
 
+### 5.1 一键安装（推荐）
+
+```bash
+git clone https://github.com/pyt111/dsh-infinite-gen-5.git
+cd dsh-infinite-gen-5
+./install-darwin.sh
+```
+
+脚本自动完成：平台前置检查 → 下载并解压 Ghidra/JDK → 编译 native decompiler
+→ 准备 Python 运行时（含 PyGhidra/JPype）→ 打项目路径补丁 → 生成清单
+→ 部署到插件目录 → 注册 web profile → 运行自检。
+
+| 参数 | 用途 |
+| --- | --- |
+| （无） | 完整安装 |
+| `--runtime-only` | 只构建运行时，不部署 |
+| `--deploy-only` | 只部署（运行时已就绪） |
+| `--reuse <路径>` | 从已有插件目录复制运行时（约 20 秒，免下载） |
+
+**`--reuse` 是跨机器迁移的最快路径**：已装好的机器上运行
+`./install-darwin.sh --reuse ~/.dsh/plugins/dsh-infinite-gen-5`，
+把 1.3 GB 运行时直接搬过来，跳过全部下载与编译。
+
+### 5.2 手动部署
+
 ```bash
 rsync -av --delete \
       --exclude='runtimes' --exclude='third_party' \
@@ -241,6 +266,40 @@ rsync -av --delete \
 
 **两个 `--exclude` 是关键**：`runtimes` 保住 1.3 GB 自建运行时，
 `third_party` 保住补丁基准源码。
+
+### 5.3 profile 注册的坑
+
+pnpm 以 `nodeLinker: hoisted` 把插件做成**硬链接副本**放进
+`~/.dsh/profiles/web/node_modules/`。这个副本**不含 `runtimes/`**
+（`file:` 依赖只复制 git 跟踪的文件），而 `engine_runtime.js` 按
+**已加载插件物理目录**解析运行时：
+
+```js
+const PLUGIN_ROOT = fs.realpathSync(path.dirname(fileURLToPath(import.meta.url)));
+const BUNDLED_RUNTIME_ROOT = path.join(PLUGIN_ROOT, 'runtimes');
+```
+
+因此必须让 profile 里的条目指向插件真身：
+
+```bash
+PROFILE_NM="$HOME/.dsh/profiles/web/node_modules"
+mv "$PROFILE_NM/dsh-infinite-gen-5" "$PROFILE_NM/.dsh-infinite-gen-5.hoisted-bak"   # 备份
+ln -s "$HOME/.dsh/plugins/dsh-infinite-gen-5" "$PROFILE_NM/dsh-infinite-gen-5"
+```
+
+`install-darwin.sh` 已包含这一步。
+
+### 5.4 清单不能包含自身
+
+上游校验器明确禁止清单自引用：
+
+```
+runtime_pack.ps1:161
+if ($relative -eq 'manifest.json' -or ...) { throw "清单不能包含自身或运行缓存: $relative" }
+```
+
+生成清单时必须排除 `manifest.json` 自身，否则
+`verify-darwin.sh --runtime` 的完整性校验会失败。
 
 ---
 

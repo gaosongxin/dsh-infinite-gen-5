@@ -66,6 +66,15 @@ git rebase --abort
 ## 部署
 
 ```bash
+./install-darwin.sh            # 一键：构建运行时 + 部署 + 注册 + 自检
+./install-darwin.sh --deploy-only      # 只部署
+./install-darwin.sh --runtime-only     # 只构建运行时
+./install-darwin.sh --reuse <路径>     # 从已有安装复制运行时（约 20 秒）
+```
+
+手动部署：
+
+```bash
 rsync -av --delete \
       --exclude='runtimes' --exclude='third_party' \
       --exclude='.git' --exclude='.ig5-local' \
@@ -73,11 +82,14 @@ rsync -av --delete \
       ~/.dsh/plugins/dsh-infinite-gen-5/
 
 # 重启 DSH（无 --expose-internals，代码不热加载）
-# ig5_doctor 确认 runtimeReady / startupVerified
 ```
 
 **关键**：`--exclude='runtimes'` 保住 1.3 GB 自建运行时，
 `--exclude='third_party'` 保住补丁基准源码。
+
+**profile 软链接**：pnpm 的硬链接副本不含 `runtimes/`，
+必须让 `~/.dsh/profiles/web/node_modules/dsh-infinite-gen-5`
+指向插件真身（`install-darwin.sh` 已处理）。
 
 ---
 
