@@ -1779,7 +1779,7 @@ function defineIg5Tools(ctx, mgr, cfg) {
       async execute(args) {
         const target = requireString(args, 'target');
         const op = requireString(args, 'op');
-        if (!['load', 'start', 'bpt', 'unbpt', 'regs', 'setreg', 'threads', 'callstack', 'step', 'stepover', 'cont', 'suspend', 'readmem', 'writemem', 'stop', 'state', 'event', 'modules', 'trace'].includes(op)) {
+        if (!['load', 'start', 'bpt', 'unbpt', 'regs', 'setreg', 'threads', 'callstack', 'step', 'stepover', 'cont', 'suspend', 'readmem', 'writemem', 'stop', 'state', 'event', 'modules', 'trace', 'signature', 'prepare'].includes(op)) {
           throw new Error(`unknown dbg op: ${op}`);
         }
         if (op === 'bpt' && args.kind === 'hardware' && args.size !== undefined && ![1, 2, 4, 8].includes(args.size)) throw new Error('Hardware breakpoint size must be 1, 2, 4 or 8');
@@ -1796,6 +1796,9 @@ function defineIg5Tools(ctx, mgr, cfg) {
           timeout: args?.timeout,
           rva: args.rva, count: args.max_steps, addressSpace: args.address_space, expected: args.expected,
           control: args.control, expected_stop_seq: args.expected_stop_seq, expected_run_id: args.expected_run_id,
+          // macOS lane: let the adapter re-sign a copy when the target carries a
+          // platform signature that SIP refuses to debug. Never modifies the original.
+          prepare: args.prepare === true, prepare_to: args?.prepare_to,
         }, Math.min(cfg.requestTimeoutMs, 75_000));
       },
     },
