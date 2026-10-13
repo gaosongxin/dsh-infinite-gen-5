@@ -241,9 +241,37 @@ if [ -d "$PLUGIN_DIR/runtimes" ] && [ "$MODE" = "deploy" ]; then
   info "保留已有运行时"
 fi
 
+# The deployment direction is repository -> plugin. Editing the plugin directly
+# and forgetting to copy back means the next deploy silently reverts that work,
+# so surface the difference before overwriting anything.
+if [ -d "$PLUGIN_DIR" ] && [ "$(cd "$REPO" && git rev-parse --git-dir 2>/dev/null)" ]; then
+  DRIFT=""
+  for rel in index.js client.js engine_runtime.js advanced_tools.js analysis_tools.js \
+             integration_tools.js workflow.js source adapters; do
+    [ -e "$REPO/$rel" ] || continue
+    # Ignore compiled caches and editor droppings: they are not source and are
+    # regenerated, so treating them as drift would cry wolf on every run.
+    if ! diff -rq -x '__pycache__' -x '*.pyc' -x '.DS_Store' "$REPO/$rel" "$PLUGIN_DIR/$rel" >/dev/null 2>&1; then
+      DRIFT="$DRIFT $rel"
+    fi
+  done
+  if [ -n "$DRIFT" ]; then
+    info "⚠️  插件目录存在仓库中没有的改动:$DRIFT"
+    info "    部署会覆盖它们。确认不需要保留后再继续；"
+    info "    要保留请先复制回仓库并提交。"
+    printf "    继续部署？[y/N] "
+    read -r answer
+    case "$answer" in
+      y|Y) ;;
+      *) die "已取消（未改动任何文件）" ;;
+    esac
+  fi
+fi
+
 rsync -a --delete \
   --exclude='runtimes' --exclude='third_party' \
   --exclude='.git' --exclude='.ig5-local' \
+  --exclude='__pycache__' --exclude='*.pyc' --exclude='.DS_Store' \
   "$REPO/" "$PLUGIN_DIR/"
 ok "源码已同步"
 

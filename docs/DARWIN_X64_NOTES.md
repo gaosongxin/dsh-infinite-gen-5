@@ -413,7 +413,80 @@ Windows 路径与无平台子目录的布局，在未改动的上游副本上同
 
 ---
 
-## 9. 相关资产
+## 9. 部署方向与代码漂移（重要）
+
+### 症状
+
+`ig5_dbg op=start prepare=true` 在插件目录里手测通过，但通过工具调用时
+`prepare` 参数不生效，adapter 收到的永远是 `None`。
+
+### 根因
+
+`ig5_dbg` 的 execute 是**逐个白名单列举参数**的，不是展开透传：
+
+```js
+return mgr.rpc(mgr.get(target), 'dbg', {
+  op, backend: ..., kind: ..., access: ...,
+  // 逐个列出，没有 prepare
+}, ...);
+```
+
+schema 里定义了 `prepare` / `prepare_to`，adapter 里也实现了，**中间的传递层漏了**。
+同时 op 白名单缺 `signature` / `prepare`，这两个 op 会被直接拒绝。
+
+### 为什么修了两次
+
+第一次修在插件目录，但**没有同步回仓库**。而 `install-darwin.sh` 的部署方向是：
+
+```
+仓库 ──rsync──> ~/.dsh/plugins/dsh-infinite-gen-5
+```
+
+下一次 `--deploy-only` 就把修复覆盖回旧版本了。
+
+**这是本次移植中重复出现的失误模式**：直接改运行副本，忘了回写仓库。
+
+### 防御措施
+
+`install-darwin.sh` 现在会在 rsync 前比对仓库与插件目录，发现漂移就停下来问：
+
+```
+⚠️  插件目录存在仓库中没有的改动: index.js adapters
+    部署会覆盖它们。确认不需要保留后再继续；
+    要保留请先复制回仓库并提交。
+    继续部署？[y/N]
+```
+
+比对时忽略 `__pycache__` / `*.pyc` / `.DS_Store`——这些是编译缓存与编辑器产物，
+不是源码，参与比对会造成误报。
+
+### 操作约定
+
+**改代码只改仓库，然后跑 `./install-darwin.sh --deploy-only`。**
+
+如果确实需要在插件目录里临时试验：
+
+```bash
+# 试验完，确认有效，先回写
+cp ~/.dsh/plugins/dsh-infinite-gen-5/<file> ~/DshWorkspace/dsh-infinite-gen-5/<file>
+cd ~/DshWorkspace/dsh-infinite-gen-5 && git add -A && git commit -m "..."
+# 再部署
+./install-darwin.sh --deploy-only
+```
+
+### 另一处相关教训
+
+`start prepare=true` 走 prepare 分支时，最初只回传了 `path/original/state/note`，
+漏掉 `imageSha256` / `signingSha256`。后果是：执行了一份重签名副本，
+却拿不到"执行的究竟是哪份载荷"的证明。
+
+`imageSha256` 是副本**签名前**的载荷摘要，等于原文件摘要——正是用来与
+已打开 artifact 比对的字段。已改为直接回传 prepare 的完整记录，
+以后 prepare 增补字段时 start 也不会漏。
+
+---
+
+## 10. 相关资产
 
 | 路径 | 内容 |
 | --- | --- |

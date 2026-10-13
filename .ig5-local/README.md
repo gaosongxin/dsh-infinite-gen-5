@@ -115,6 +115,27 @@ runtimes/darwin-x64/
 
 ---
 
+## 改代码的约定
+
+**只改仓库，改完部署。** 直接改插件目录的改动会在下次部署时被覆盖：
+
+```bash
+cd ~/DshWorkspace/dsh-infinite-gen-5
+# 改代码…
+./install-darwin.sh --deploy-only    # 部署
+```
+
+`install-darwin.sh` 会在 rsync 前检测漂移（插件目录有仓库里没有的改动时停下来问），
+所以误改不会静默丢失。
+
+需要临时在插件目录试验时，确认有效后先回写仓库再部署：
+
+```bash
+cp ~/.dsh/plugins/dsh-infinite-gen-5/<file> ~/DshWorkspace/dsh-infinite-gen-5/<file>
+cd ~/DshWorkspace/dsh-infinite-gen-5 && git add -A && git commit -m "..."
+./install-darwin.sh --deploy-only
+```
+
 ## 日常操作
 
 ```bash
