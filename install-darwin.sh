@@ -105,9 +105,12 @@ if [ "$MODE" = "full" ] || [ "$MODE" = "runtime" ]; then
     if [ ! -d "$RUNTIME/ghidra/ghidra_${GHIDRA_VER}_PUBLIC" ]; then
       info "解压 Ghidra…"
       unzip -q -o "$GHIDRA_ZIP" -d "$RUNTIME/ghidra/"
-      # 官方 zip 顶层目录名可能与版本号不同，统一改名为期望值
-      ACTUAL="$(find "$RUNTIME/ghidra" -maxdepth 1 -type d -name 'ghidra_*' ! -name 'ghidra_${GHIDRA_VER}_PUBLIC' | head -1)"
-      [ -n "$ACTUAL" ] && mv "$ACTUAL" "$RUNTIME/ghidra/ghidra_${GHIDRA_VER}_PUBLIC"
+      # 官方 zip 顶层目录名可能与版本号不同，统一改名为期望值。
+      # 过滤模式必须双引号展开，否则排除条件失效、mv 会把目录移进它自己。
+      ACTUAL="$(find "$RUNTIME/ghidra" -maxdepth 1 -type d -name 'ghidra_*' ! -name "ghidra_${GHIDRA_VER}_PUBLIC" | head -1)"
+      if [ -n "$ACTUAL" ] && [ "$ACTUAL" != "$RUNTIME/ghidra/ghidra_${GHIDRA_VER}_PUBLIC" ]; then
+        mv "$ACTUAL" "$RUNTIME/ghidra/ghidra_${GHIDRA_VER}_PUBLIC"
+      fi
     fi
     ok "Ghidra 已解压"
 
