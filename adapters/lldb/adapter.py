@@ -694,9 +694,10 @@ class Adapter:
             self.record_event("process-started", {"pid": st.get("pid")})
             result = {"ok": True, "op": op, **st, "context": self.context()}
             if prepared:
-                result["signature"] = {"prepared": True, "path": prepared["path"],
-                                       "original": prepared["original"], "state": prepared["state"],
-                                       "note": prepared["note"]}
+                # Carry the full prepare record, including both digests: an
+                # execution that ran a re-signed copy must be able to prove
+                # which payload was actually launched.
+                result["signature"] = dict(prepared)
             return result
 
         if op == "signature":
