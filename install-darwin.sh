@@ -181,6 +181,33 @@ if [ "$MODE" = "full" ] || [ "$MODE" = "runtime" ]; then
       ok "Python 运行时已存在"
     fi
 
+    # 1.45 ghidra 引擎描述
+    # 上游只在 Windows 包里由 runtime_pack.ps1 生成这份 runtime.json；
+    # 宿主的 readRuntime 校验器与 build_patch.py 都要求它存在，darwin 侧需自行落盘。
+    if [ ! -f "$RUNTIME/ghidra/runtime.json" ]; then
+      step "生成 ghidra/runtime.json"
+      cat > "$RUNTIME/ghidra/runtime.json" <<JSON
+{
+  "schemaVersion": 1,
+  "engine": "Ghidra",
+  "version": "${GHIDRA_VER}",
+  "platform": "darwin-x64",
+  "pythonVersion": "3.12",
+  "pythonExe": "python/bin/python3.12",
+  "pythonLibrary": "python/lib/libpython3.12.dylib",
+  "pythonStdlib": "python/lib/python3.12",
+  "pythonModules": "python/lib/python3.12/site-packages",
+  "jpypeLibrary": "python/lib/python3.12/site-packages/_jpype.cpython-312-darwin.so",
+  "ghidraHome": "ghidra_${GHIDRA_VER}_PUBLIC",
+  "javaHome": "jdk-21.0.12.1+1/Contents/Home",
+  "projectRoot": "projects"
+}
+JSON
+      ok "ghidra/runtime.json 已生成"
+    else
+      ok "ghidra/runtime.json 已存在"
+    fi
+
     # 1.5 项目路径补丁
     if ! grep -q "localProjectPathPatch" "$RUNTIME/ghidra/runtime.json" 2>/dev/null; then
       step "应用项目路径补丁 (让 .dsh 目录可用)"
